@@ -17,6 +17,7 @@ import pylab as py
 import scipy.io
 import pickle
 import math
+import cmath
 import sys
 import os
 
@@ -53,8 +54,6 @@ class ADCP(object):
                       6: ("num_bins","unit","velocity_ref","intensity_units",\
                           "intensity_scale","sound_absorption")
                     }
-            
-        #self.bscmoy = (self.cell_bsc1+self.cell_bsc2+self.cell_bsc3+self.cell_bsc4)/4
 
         self.bin_attrs = ["depthcell", "velocity", "azimuth", "east", "north", "up", "error", "bsc1",\
              "bsc2", "bsc3", "bsc4", "percent_good", "discharge"]
@@ -119,17 +118,22 @@ class ADCP(object):
     
 ###############################################################################
     def calcul(self):
+        # *0.3048 : from feet to meters
         self.bsc=[(self.cell_bsc1[i]+self.cell_bsc2[i]+self.cell_bsc3[i]+self.cell_bsc4[i])/4 for i in range(len(self.cell_bsc1))]
-        self.depth=[(self.depth1[i]+self.depth2[i]+self.depth3[i]+self.depth4[i])/4 for i in range(len(self.depth1))]
-        self.deepblanking=  [math.cos(20*math.pi/180)*self.depth[i] for i in range(len(self.depth))]# zone de champs lointain cos
+        self.elapsed_distance=[0.3048*self.elapsed_distance[i] for i in range(len(self.elapsed_distance))]
+        self.depth=[0.3048*(self.depth1[i]+self.depth2[i]+self.depth3[i]+self.depth4[i])/4 for i in range(len(self.depth1))]
+        self.cell_depthcell=np.array([[0.3048*self.cell_depthcell[i,j] for i in range(len(self.cell_depthcell[:,0]))] for j in range(len(self.cell_depthcell[0]))]).T    
+        self.deepblanking=[math.cos(20*math.pi/180)*self.depth[i] for i in range(len(self.depth))]# zone de champs lointain cos
         for i in self.bin_attrs:
             exec('self.cell_'+i+'[np.where(self.cell_'+i+'==-32768)]=np.nan')
 
 
-###############################################################################
+###############################################################################python
     def ping10(self):
+        
         cell_velocity=np.copy(self.cell_velocity)
         cell_azimuth=np.copy(self.cell_azimuth)
+        
         # MOYENNE SUR 10 PINGS DES DONNEES DE VITESSE #########################
         self.mean_velocity = np.ones(np.shape(cell_velocity))
         for j in range(len(cell_velocity[0])): 
@@ -145,27 +149,53 @@ class ADCP(object):
                     self.mean_velocity[i:i+10,j]= np.array(M)  
                 i=i+10
     
-        # MOYENNE SUR 10 PINGS DES DONNEES DE DIRECTION #######################
+        # # MOYENNE SUR 10 PINGS DES DONNEES DE DIRECTION (mauvaise methode) ##
+        # self.mean_azimuth = np.ones(np.shape(cell_azimuth))        
+        # for j in range(len(cell_azimuth[0])): 
+        #     i=0         # all along the row
+        #     while i <= len(cell_azimuth[:,j]):    # all along the column    
+        #         M2 = cell_azimuth[i:i+10,j]  #,j:j+17]  # meaning 1x10-bin cell
+        #         moy = np.nanmean(M2)
+        #         for k in range(len(M2)):
+        #             if M2[k] != np.nan :
+        #                 M2[k] = moy
+        #             else:
+        #                 M2[k]=np.nan
+        #             self.mean_azimuth[i:i+10,j]= np.array(M2)  
+        #         i=i+10     
+                
+        # MOYENNE SUR 10 PINGS DES DONNEES DE DIRECTION (methode complexe) ####
         self.mean_azimuth = np.ones(np.shape(cell_azimuth))        
         for j in range(len(cell_azimuth[0])): 
-            i=0         # all along the row
+            i=0                                   # all along the row
             while i <= len(cell_azimuth[:,j]):    # all along the column    
-                M2 = cell_azimuth[i:i+10,j]  #,j:j+17]  # meaning 1x10-bin cell
-                moy = np.nanmean(M2)
-                for k in range(len(M2)):
-                    if M2[k] != np.nan :
-                        M2[k] = moy
-                    else:
-                        M2[k]=np.nan
-                    self.mean_azimuth[i:i+10,j]= np.array(M2)  
+                M2 = cell_azimuth[i:i+10,j]     # meaning 1x10-bin cell
+                # moy = np.nanmean(M2)                
+                M2nan = M2[np.isnan(M2)==False]
+                if len(M2nan) != 0:
+                #if np.isnan(M2.any()) != True: #np.full((10),True):
+                    #M2nan = M2[np.isnan(M2)==False]
+                    moy_deg = math.degrees(cmath.phase(sum(cmath.rect(1,math.radians(d)) for d in M2nan)/len(M2nan)))
+                    if moy_deg<0:
+                        moy_deg = moy_deg+360                       
+                    for k in range(len(M2)):
+                        if M2[k] != np.nan :
+                            M2[k] = moy_deg
+                        else:
+                            M2[k]=np.nan                           
+                else:
+                    for k in range(len(M2)):
+                        M2[k] = np.nan                       
+                self.mean_azimuth[i:i+10,j]= np.array(M2)  
                 i=i+10     
+
 
 ###############################################################################
     def plot10pingADCP(self):
         
         # Data preparation
         y=self.cell_depthcell[0,:]
-        z=self.depth
+        z=self.depth  # convert feet in meters
         
         for i in ['velocity','azimuth']:
             exec('self.Z=np.transpose(self.mean_'+i+'.copy())')
@@ -184,7 +214,10 @@ class ADCP(object):
             plt.rc('font', family='serif')
             # ---------------------           
             # subplot 1
-            graf1=ax1.pcolor(X,Y, Zmask, vmin=0, vmax=360,cmap='twilight_shifted') # to change if velocity
+            if i == 'velocity':
+                graf1=ax1.pcolor(X,Y,Zmask,vmin=0,vmax=6,cmap='jet') 
+            elif i =='azimuth':
+                graf1=ax1.pcolor(X,Y,Zmask,vmin=0,vmax=360,cmap='twilight_shifted')   # ou cmap='hsv'
             #ax1.hold
             try:
                 ax1.plot(x,z, linewidth=4, color='k')
@@ -196,7 +229,11 @@ class ADCP(object):
             ax1.invert_yaxis()
             cb=fig.colorbar(graf1, ax=ax1,orientation='vertical')
             cb.ax.tick_params(labelsize=8) 
-            cb.set_label(str(i)+'(moyennée sur 10 bins) [degrés]',fontsize=10)   
+            if i == "velocity":
+                cb.set_label('Vitesse du courant moyennée sur 10 cellules [cm/s]',fontsize=10) #cb.set_label(str(i).replace('_',' '),fontsize=10)   
+            elif i == "azimuth":
+                cb.set_label('Direction du courant moyennée sur 10 cellules [degrés]',fontsize=10) #cb.set_label(str(i).replace('_',' '),fontsize=10)   
+            #cb.set_label(str(i)+'(moyennée sur 10 bins) [degrés]',fontsize=10)   
             #ax1.set_title(str(i).replace('_', ' '), fontsize=18, color='gray')
             
             ax1.set_ylabel(r'Profondeur [m]', fontsize=10)
@@ -225,7 +262,7 @@ class ADCP(object):
         y=self.cell_depthcell[0,:]
         z=self.depth
         
-        for i in self.bin_attrs:
+        for i in ["velocity","azimuth","error"]: #self.bin_attrs:
             exec('self.Z=np.transpose(self.cell_'+i+'.copy())')
             #Z=np.transpose(Zi)
             Zmask=np.ma.masked_where(np.isnan(self.Z)==1, self.Z)
@@ -242,7 +279,12 @@ class ADCP(object):
             plt.rc('font', family='serif')
             # ---------------------           
             # subplot 1
-            graf1=ax1.pcolor(X,Y, Zmask, vmin=0, vmax=360)
+            if i == 'velocity':
+                graf1=ax1.pcolor(X,Y,Zmask,vmin=0,vmax=6,cmap='jet') 
+            elif i == 'error':
+                graf1=ax1.pcolor(X,Y,Zmask,vmin=0,vmax=3) 
+            elif i =='azimuth':
+                graf1=ax1.pcolor(X,Y,Zmask,vmin=0,vmax=360,cmap='twilight_shifted')   # ou cmap='hsv'
             #ax1.hold
             try:
                 ax1.plot(x,z, linewidth=4, color='k')
@@ -254,7 +296,12 @@ class ADCP(object):
             ax1.invert_yaxis()
             cb=fig.colorbar(graf1, ax=ax1,orientation='vertical')
             cb.ax.tick_params(labelsize=8) 
-            cb.set_label('Direction du courant [degrés]',fontsize=10) #cb.set_label(str(i).replace('_',' '),fontsize=10)   
+            if i == "velocity":
+                cb.set_label('Vitesse du courant [cm/s]',fontsize=10) #cb.set_label(str(i).replace('_',' '),fontsize=10)   
+            elif i == "error":
+                cb.set_label('Incertitude sur la vitesse [cm/s]',fontsize=10) #cb.set_label(str(i).replace('_',' '),fontsize=10)
+            elif i == "azimuth":
+                cb.set_label('Direction du courant [degrés]',fontsize=10) #cb.set_label(str(i).replace('_',' '),fontsize=10)   
             #ax1.set_title(str(i).replace('_', ' '), fontsize=18, color='gray')
             
             ax1.set_ylabel(r'Profondeur [m]', fontsize=10)
@@ -273,8 +320,8 @@ class ADCP(object):
             fig.savefig(figname, dpi=tdpi)
             
             # !!! TO DISPLAY ONLY 1 VARIABLE
-            #if i != "azimuth":   # Change variable name here
-            plt.close(fig)
+            if not [(i=="error") or (i=="velocity") or (i=="azimuth")]:  
+                plt.close(fig)
 
 ###############################################################################                
     def meanbscADCP(self):
@@ -328,7 +375,7 @@ class ADCP(object):
         print ('Figure :', figname, ' :', tdpi,' dpi......Ok'  ) 
         fig.savefig(figname, dpi=tdpi)
         
-        plt.close(fig)
+        #plt.close(fig)
        
 
                                                                       #      
@@ -366,15 +413,15 @@ adcp= ADCP()
 ##########################################################  
 ###              OPEN FILE                             ###
 ##########################################################  
-adcp.filename='ADCP_07032023/GROUPE3_002t.000'
-#adcp.filename='ADCP_08032023/RHO_004t.000'
+
+adcp.filename='ADCP_08032023/RHO_001t.000'
+
 ############################# 
 ### READ FILE
 ############################# 
 adcp.load_ADCP()
 adcp.calcul()
 adcp.ping10()
- 
 
                                                                       #      
                                                                      ###                  
@@ -402,9 +449,9 @@ print ('-----------------------------------------------------')
 ## Figures 2 D
 adcp.plot10pingADCP()
 print('------------------------------------------------------')
-#adcp.figureADCP()
-print('------------------------------------------------------')
-#adcp.meanbscADCP()
+adcp.figureADCP()
+#print('------------------------------------------------------')
+adcp.meanbscADCP()
                                                                       #      
                                                                      ###                  
                                                                     # # #
@@ -413,3 +460,4 @@ print('------------------------------------------------------')
 ########################################################################################################################################################## 
 #       import pdb; pdb.set_trace()
 
+    
